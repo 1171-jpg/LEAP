@@ -1,0 +1,130 @@
+{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "b5ba5762",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import torch\n",
+    "from torch.utils.data import TensorDataset\n",
+    "from www.utils import get_sublist\n",
+    "import spacy\n",
+    "from www.dataset.ann import human_atts, att_to_idx, att_types\n",
+    "import progressbar\n",
+    "from time import sleep\n",
+    "from copy import deepcopy\n",
+    "import numpy as np"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "05d2c869",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def add_bert_features_tiered_modify(dataset,tokenizer,seq_length,maxStoryLength,add_segment_ids=False):\n",
+    "    nlp = spacy.load(\"en_core_web_sm\")\n",
+    "#     max_story_length = max([len(ex['sentences']) for p in dataset for ex_2s in dataset[p] for ex in ex_2s['stories']])\n",
+    "    for p in dataset:\n",
+    "        bar_size = len(dataset[p])\n",
+    "        bar = progressbar.ProgressBar(max_value=bar_size, widgets=[progressbar.Bar('=', '[', ']'), ' ', progressbar.Percentage()])\n",
+    "        bar_idx = 0\n",
+    "        bar.start()\n",
+    "        for i, ex_2s in enumerate(dataset[p]):\n",
+    "            for s_idx, ex_1s in enumerate(ex_2s['stories']):\n",
+    "                for ent_idx, ex in enumerate(ex_1s['entities']):\n",
+    "                    question=\"Where is \"+str(ex['entity']+\"?! </s> \")\n",
+    "                    story=\"\"\n",
+    "                    for idx,sentence in enumerate(ex['sentences']):\n",
+    "                        story=story+sentence+\" </s> \" if idx< len(ex['sentences'])-1 else story+sentence\n",
+    "                    qaStories=[question+story]*5\n",
+    "                    inputs=tokenizer(qaStories)\n",
+    "                    f_out=[]\n",
+    "                    for time in range(len(ex['sentences'])):\n",
+    "                        timestamp_id=[]\n",
+    "                        check= -1\n",
+    "                        for index,ids in enumerate(inputs['input_ids'][0]):\n",
+    "                            if ids == 2:\n",
+    "                                check += 1\n",
+    "                            if check == -1:\n",
+    "                                timestamp_id.append(0)\n",
+    "                            elif ids == 2:\n",
+    "                                timestamp_id.append(0)\n",
+    "                            else:\n",
+    "                                if check < time :\n",
+    "                                    timestamp_id.append(1)\n",
+    "                                elif check == time:\n",
+    "                                    timestamp_id.append(2)\n",
+    "                                else:\n",
+    "                                    timestamp_id.append(3)\n",
+    "                        f_out.append(timestamp_id)\n",
+    "                    input_ids=inputs['input_ids']\n",
+    "                    attention_mask=inputs[\"attention_mask\"]\n",
+    "                    for index in range(len(input_ids)):\n",
+    "                        assert len(input_ids[index]) <= maxStoryLength\n",
+    "                        paddingLength=maxStoryLength-len(input_ids[index])\n",
+    "                        input_ids[index]=input_ids[index]+[0]*paddingLength\n",
+    "                        attention_mask[index]=attention_mask[index]+[0]*paddingLength\n",
+    "                        f_out[index]=f_out[index]+[0]*paddingLength\n",
+    "                    dataset[p][i]['stories'][s_idx]['entities'][ent_idx][\"input_ids\"]=inputs['input_ids']\n",
+    "                    dataset[p][i]['stories'][s_idx]['entities'][ent_idx][\"attention_mask\"]=inputs[\"attention_mask\"]\n",
+    "                    dataset[p][i]['stories'][s_idx]['entities'][ent_idx][\"timestep_type_ids\"]=f_out\n",
+    "            bar_idx += 1\n",
+    "            bar.update(bar_idx)\n",
+    "        bar.finish()\n",
+    "    return dataset"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "57e8bfea",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def get_tensor_dataset_tiered_modify(dataset,max_sentences,maxStoryLength,add_segment_ids=False):\n",
+    "    max_entities = max([len(story['entities']) for ex_2s in dataset for story in ex_2s['stories']])\n",
+    "    num_attributes = len(dataset[0]['stories'][0]['entities'][0]['preconditions'][0])\n",
+    "\n",
+    "    all_input_ids = torch.tensor([[[[story['entities'][e]['input_ids'][s] if e < len(story['entities']) else np.zeros((maxStoryLength)) for s in range(max_sentences)] for e in range(max_entities)] for story in ex_2s['stories']] for ex_2s in dataset])\n",
+    "    all_lengths = torch.tensor([[[len(story['sentences']) for e in range(max_entities)] for story in ex_2s['stories']] for ex_2s in dataset], dtype=torch.int64)\n",
+    "    num_entities = torch.tensor([[len(story['entities']) for story in ex_2s['stories']] for ex_2s in dataset], dtype=torch.int64)\n",
+    "    all_input_mask = torch.tensor([[[[story['entities'][e]['attention_mask'][s] if e < len(story['entities']) else np.zeros((maxStoryLength)) for s in range(max_sentences)] for e in range(max_entities)] for story in ex_2s['stories']] for ex_2s in dataset])\n",
+    "    all_attributes = torch.tensor([[[[story['entities'][e]['attributes'][s] if e < len(story['entities']) and s < len(story['entities'][0]) else np.zeros((num_attributes)) for s in range(max_sentences)] for e in range(max_entities)] for story in ex_2s['stories']] for ex_2s in dataset], dtype=torch.long)\n",
+    "    all_preconditions = torch.tensor([[[[story['entities'][e]['preconditions'][s] if e < len(story['entities']) and s < len(story['entities'][0]) else np.zeros((num_attributes)) for s in range(max_sentences)] for e in range(max_entities)] for story in ex_2s['stories']] for ex_2s in dataset], dtype=torch.long)\n",
+    "    all_effects = torch.tensor([[[[story['entities'][e]['effects'][s] if e < len(story['entities']) and s < len(story['entities'][0]) else np.zeros((num_attributes)) for s in range(max_sentences)] for e in range(max_entities)] for story in ex_2s['stories']] for ex_2s in dataset], dtype=torch.long)\n",
+    "    all_spans = torch.tensor([[[story['entities'][e]['conflict_span_onehot'] if e < len(story['entities']) else np.zeros((max_sentences)) for e in range(max_entities)] for story in ex_2s['stories']] for ex_2s in dataset], dtype=torch.long)\n",
+    "    all_label_ids = torch.tensor([ex['label'] for ex in dataset], dtype=torch.long)\n",
+    "    \n",
+    "    all_timestep_type_ids=torch.tensor([[[[story['entities'][e]['timestep_type_ids'][s] if e < len(story['entities']) else np.zeros((maxStoryLength)) for s in range(max_sentences)] for e in range(max_entities)] for story in ex_2s['stories']] for ex_2s in dataset])\n",
+    "    \n",
+    "    tensor_dataset = TensorDataset(all_input_ids, all_lengths, num_entities, all_input_mask, all_attributes, all_preconditions, all_effects, all_spans, all_label_ids,all_timestep_type_ids)\n",
+    "    return tensor_dataset"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.7.13"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
